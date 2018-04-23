@@ -14,7 +14,9 @@ from .simprocedures import receive
 from .simprocedures import FixedOutTransmit, FixedInReceive, FixedRandom
 from simuvex import s_options as so
 from simuvex import s_cc
-
+import time
+import sys
+from getlibcfunctionaddr import get_known_libc_functionaddr
 import logging
 
 l = logging.getLogger("tracer.Tracer")
@@ -90,7 +92,7 @@ class Tracer(object):
         self.preconstrain_flag = preconstrain_flag
         self.simprocedures = {} if simprocedures is None else simprocedures
         self._hooks = {} if hooks is None else hooks
-        self.input_max_size = max_size or len(input)
+        self.input_max_size = max_size or len(input) #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         self.exclude_sim_procedures_list = ["malloc","free","calloc","realloc"] if exclude_sim_procedures_list is None else exclude_sim_procedures_list
         self.argv = argv or [binary]
 
@@ -249,7 +251,7 @@ class Tracer(object):
 
                 if current.addr == self.trace[self.bb_cnt]:
                     self.bb_cnt += 1
-
+                    
                 # angr steps through the same basic block twice when a syscall
                 # occurs
                 elif current.addr == self.previous_addr or \
@@ -262,14 +264,15 @@ class Tracer(object):
                 elif self._p.is_hooked(current.addr) or \
                         self._p._simos.syscall_table.get_by_addr(current.addr) is not None \
                         or not self._address_in_binary(current.addr):
-
+                   
                     # If dynamic trace is in the PLT stub, update bb_cnt until it's out
                     while self._addr_in_plt(self.trace[self.bb_cnt]):
                         self.bb_cnt += 1
-
+                  
                 # handle hooked functions
                 # we use current._project since it seems to be different than self._p
-                elif current._project.is_hooked(self.previous_addr) and self.previous_addr in self._hooks:
+                #elif current._project.is_hooked(self.previous_addr) and self.previous_addr in self._hooks:
+                elif current._project.is_hooked(self.previous_addr):
                     l.debug("ending hook for %s", current._project.hooked_by(self.previous_addr))
                     l.debug("previous addr %#x", self.previous_addr)
                     l.debug("bb_cnt %d", self.bb_cnt)
@@ -278,11 +281,16 @@ class Tracer(object):
                     while current_addr != self.trace[self.bb_cnt] and self.bb_cnt < len(self.trace):
                         self.bb_cnt += 1
                     # step 1 more for the normal step that would happen
-                    self.bb_cnt += 1
-                    l.debug("bb_cnt after the correction %d", self.bb_cnt)
+                    self.bb_cnt += 1 
                     if self.bb_cnt >= len(self.trace):
-                        return self.path_group
-
+                        if self.crash_mode:
+                            print "if in crash_mode,do not return"
+                        else:
+                            return self.path_group
+                #handle angr use differt libc_func compared with qemu
+                elif current._project.is_hooked(current.addr) and current._project.is_hooked(self.trace[self.bb_cnt]):
+                    print 'handle angr use differt libc_func compared with qemu'
+                    
                 else:
                     l.error(
                         "the dynamic trace and the symbolic trace disagreed"
@@ -300,7 +308,6 @@ class Tracer(object):
                         self.no_follow = True
                     else:
                         raise TracerMisfollowError
-
             # shouldn't need to copy
             self.previous = current
             # TODO this shouldn't be needed, fish fix the bug plesae
@@ -383,7 +390,7 @@ class Tracer(object):
         else:
             l.debug("bb %d / %d", self.bb_cnt, len(self.trace))
             self.path_group = self.path_group.stash_not_addr(
-                                           self.trace[self.bb_cnt],
+                                           self.trace[self.bb_cnt],from_stash='active',
                                            to_stash='missed')
         if len(self.path_group.active) > 1: # rarely we get two active paths
             self.path_group = self.path_group.prune(to_stash='missed')
@@ -407,11 +414,12 @@ class Tracer(object):
 
             # Have we corrected it?
             corrected = False
-
+           
             # did our missed branch try to go back to a rep?
-            target = self.path_group.missed[0].addr
+            #target = self.path_group.missed[0].addr
+            '''
             if self._p.arch.name == 'X86' or self._p.arch.name == 'AMD64':
-
+                
                 # does it looks like a rep? rep ret doesn't count!
                 if self._p.factory.block(target).bytes.startswith("\xf3") and \
                    not self._p.factory.block(target).bytes.startswith("\xf3\xc3"):
@@ -427,7 +435,7 @@ class Tracer(object):
 
             if not corrected:
                 l.warning("Unable to correct discrepancy between qemu and angr.")
-
+            '''
         self.path_group = self.path_group.drop(stash='missed')
 
         return rpg
@@ -496,6 +504,8 @@ class Tracer(object):
             branches = self.next_branch()
 
             # if we spot a crashed path in crash mode return the goods
+            if not self.previous.state.satisfiable():
+                print self.bb_cnt
             if self.crash_mode and 'crashed' in branches.stashes:
                 if self.crash_type == EXEC_STACK:
                     return self.path_group.crashed[0], self.crash_state
@@ -1063,7 +1073,17 @@ class Tracer(object):
             project = angr.Project(self.binary,load_options={'main_opts': {'custom_base_addr': self.qemu_base_addr }},exclude_sim_procedures_list=self.exclude_sim_procedures_list)
         else:
             project = angr.Project(self.binary,exclude_sim_procedures_list=self.exclude_sim_procedures_list)
-
+            known_libc_functions = get_known_libc_functionaddr(self.binary)
+            #known_libc_functions_new = {}
+            #for key,val in known_libc_functions.items():
+                #known_libc_functions_new[val] = key
+            simfuncs = simuvex.procedures.SimProcedures['libc.so.6'] #changed for RHG!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!1
+            #func_to_hook = {}
+            #func_to_hook = {'memcpy':0x0805CA00,'scanf':0x0804F1F0,'printf':0x0804F190,'strlen':0x0805b800,'__libc_start_main':0x08048eb0}
+            for addr,name in known_libc_functions.items():
+                if name in simfuncs:
+                    project.hook(int(addr,16), angr.Hook(simuvex.SimProcedures['libc.so.6'][name])) 
+            
         if not self.crash_mode:
             self._set_linux_simprocedures(project)
 
